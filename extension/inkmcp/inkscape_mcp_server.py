@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Inkscape MCP Server
-Model Context Protocol server for controlling Inkscape via D-Bus extension
+Model Context Protocol server for controlling Inkscape on macOS through its MCP extension
 
 Provides access to Inkscape operations through a unified tool interface
 for SVG element creation, document manipulation, and code execution.
@@ -10,8 +10,6 @@ for SVG element creation, document manipulation, and code execution.
 import json
 import logging
 import os
-import subprocess
-import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional, Union
@@ -19,112 +17,34 @@ from typing import Any, AsyncIterator, Dict, Optional, Union
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import ImageContent
 
+import macos_bridge
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("InkscapeMCP")
 
-# Server configuration
-DEFAULT_DBUS_SERVICE = "org.inkscape.Inkscape"
-DEFAULT_DBUS_PATH = "/org/inkscape/Inkscape"
-DEFAULT_DBUS_INTERFACE = "org.gtk.Actions"
-DEFAULT_ACTION_NAME = "org.khema.inkscape.mcp"
-
 
 class InkscapeConnection:
-    """Manages D-Bus connection to Inkscape"""
-
-    def __init__(self):
-        self.dbus_service = DEFAULT_DBUS_SERVICE
-        self.dbus_path = DEFAULT_DBUS_PATH
-        self.dbus_interface = DEFAULT_DBUS_INTERFACE
-        self.action_name = DEFAULT_ACTION_NAME
-        self._client_path = Path(__file__).parent / "inkmcpcli.py"
+    """Reaches the MCP extension inside the running Inkscape through macos_bridge"""
 
     def is_available(self) -> bool:
-        """Check if Inkscape is running and MCP extension is available"""
+        """Check if Inkscape is running and this process may send it the extension's shortcut"""
         try:
-            cmd = [
-                "gdbus",
-                "call",
-                "--session",
-                "--dest",
-                self.dbus_service,
-                "--object-path",
-                self.dbus_path,
-                "--method",
-                f"{self.dbus_interface}.List",
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-
-            if result.returncode != 0:
-                logger.warning("Inkscape D-Bus service not available")
-                return False
-
-            # Check if our generic MCP extension action is listed
-            output = result.stdout
-            return self.action_name in output
-
-        except Exception as e:
-            logger.error(f"Error checking Inkscape availability: {e}")
+            macos_bridge.check_ready()
+            return True
+        except macos_bridge.BridgeError as e:
+            logger.warning(str(e))
             return False
 
     def execute_operation(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute operation using CLI client"""
+        """Run one operation in Inkscape and return the extension's response"""
         try:
-            # Write operation data to temporary file
-            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
-
-            with open(params_file, "w") as f:
-                json.dump(operation_data, f)
-
-            # Execute via D-Bus
-            cmd = [
-                "gdbus",
-                "call",
-                "--session",
-                "--dest",
-                self.dbus_service,
-                "--object-path",
-                self.dbus_path,
-                "--method",
-                f"{self.dbus_interface}.Activate",
-                self.action_name,
-                "[]",
-                "{}",
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-            if result.returncode != 0:
-                logger.error(f"D-Bus command failed: {result.stderr}")
-                return {
-                    "status": "error",
-                    "data": {"error": f"D-Bus call failed: {result.stderr}"},
-                }
-
-            # Read response from response file
-            response_file = operation_data.get("response_file")
-            if response_file and os.path.exists(response_file):
-                try:
-                    with open(response_file, "r") as f:
-                        response_data = json.load(f)
-                    os.remove(response_file)  # Clean up
-                    return response_data
-                except Exception as e:
-                    logger.error(f"Failed to read response file: {e}")
-                    return {
-                        "status": "error",
-                        "data": {"error": f"Response file error: {e}"},
-                    }
-            else:
-                # Assume success if no response file specified
-                return {"status": "success", "data": {"message": "Operation completed"}}
-
-        except subprocess.TimeoutExpired:
-            logger.error("Operation timed out")
-            return {"status": "error", "data": {"error": "Operation timed out"}}
+            return macos_bridge.send(operation_data)
+        except macos_bridge.BridgeError as e:
+            logger.error(str(e))
+            return {"status": "error", "data": {"error": str(e)}}
         except Exception as e:
             logger.error(f"Operation execution error: {e}")
             return {"status": "error", "data": {"error": str(e)}}
@@ -135,18 +55,13 @@ _inkscape_connection: Optional[InkscapeConnection] = None
 
 
 def get_inkscape_connection() -> InkscapeConnection:
-    """Get or create Inkscape connection"""
+    """Get the Inkscape connection, raising with the fix when Inkscape cannot be reached"""
     global _inkscape_connection
 
     if _inkscape_connection is None:
         _inkscape_connection = InkscapeConnection()
 
-    if not _inkscape_connection.is_available():
-        raise Exception(
-            "Inkscape is not running or generic MCP extension is not available. "
-            "Please start Inkscape and ensure the generic MCP extension is installed."
-        )
-
+    macos_bridge.check_ready()
     return _inkscape_connection
 
 
@@ -364,23 +279,13 @@ def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
     - Add details: execute-code code="svg.getElementById('house').append(new_window_element)"
 
     """
-    response_file = None
     try:
         connection = get_inkscape_connection()
-
-        # Create unique response file for this operation
-        response_fd, response_file = tempfile.mkstemp(
-            suffix=".json", prefix="mcp_response_"
-        )
-        os.close(response_fd)
 
         # Parse the command string using the same logic as our client
         from inkmcpcli import parse_command_string
 
         parsed_data = parse_command_string(command)
-
-        # Add response file to the operation data
-        parsed_data["response_file"] = response_file
 
         logger.info(f"Executing command: {command}")
         logger.debug(f"Parsed data: {parsed_data}")
@@ -403,13 +308,6 @@ def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
     except Exception as e:
         logger.error(f"Error in inkscape_operation: {e}")
         return f"❌ Operation failed: {str(e)}"
-    finally:
-        # Clean up response file if it exists
-        if response_file and os.path.exists(response_file):
-            try:
-                os.remove(response_file)
-            except OSError:
-                pass
 
 
 def main():

@@ -4,7 +4,12 @@ import tempfile
 import base64
 import os
 from typing import Dict, Any
-from inkex.command import call
+from inkex.command import call, INKSCAPE_EXECUTABLE_NAME
+
+# Inkscape tells its extensions where its binary is; a Finder-launched app has no inkscape on PATH.
+MAC_APP_BINARY = "/Applications/Inkscape.app/Contents/MacOS/inkscape"
+INKSCAPE_BINARY = (INKSCAPE_EXECUTABLE_NAME if os.path.isabs(INKSCAPE_EXECUTABLE_NAME)
+                   else MAC_APP_BINARY if os.path.exists(MAC_APP_BINARY) else INKSCAPE_EXECUTABLE_NAME)
 from .common import create_success_response, create_error_response
 
 
@@ -48,7 +53,7 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
                 if max_size < width:
                     dpi = int((max_size / width) * 96)
 
-            call('inkscape',
+            call(INKSCAPE_BINARY,
                  '--export-type=png',
                  f'--export-filename={output_path}',
                  f'--export-dpi={dpi}',

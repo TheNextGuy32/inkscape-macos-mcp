@@ -7,7 +7,6 @@ Handles any SVG element through dynamic class instantiation
 import inkex
 import json
 import os
-import tempfile
 from typing import Dict, Any, List
 from inkmcp.inkmcpops.element_mapping import (
     get_element_class,
@@ -18,6 +17,7 @@ from inkmcp.inkmcpops.element_mapping import (
 from inkmcp.inkmcpops.common import get_element_info_data
 from inkmcp.inkmcpops.export_operations import export_document_image
 from inkmcp.inkmcpops.execute_operations import execute_code
+from inkmcp.macos_bridge import IPC_DIR, REQUEST_FILE
 
 
 class ElementCreator(inkex.EffectExtension):
@@ -241,14 +241,14 @@ class ElementCreator(inkex.EffectExtension):
         """Main extension entry point"""
         element_data = {}  # Initialize to avoid unbound variable
         try:
-            # Read JSON data from fixed file path (like original system)
-            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
+            # Read the request the macOS bridge left for this run
+            params_file = REQUEST_FILE
             if not os.path.exists(params_file):
                 response = {
                     "status": "error",
                     "data": {"error": "No parameters file found"},
                 }
-                self.write_response(response, "/tmp/error_response.json")
+                self.write_response(response, os.path.join(IPC_DIR, "error_response.json"))
                 return
 
             with open(params_file, "r") as f:

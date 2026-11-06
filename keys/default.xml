@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<keys name="User Shortcuts">
+  <bind gaction="app.org.khema.inkscape.mcp.noprefs" keys="&lt;primary&gt;&lt;shift&gt;F12" />
+</keys>

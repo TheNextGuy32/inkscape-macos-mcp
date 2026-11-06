@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Inkscape MCP Client
-Command-line interface for creating any SVG element via D-Bus MCP extension with unified parsing
+Command-line interface for creating any SVG element through the macOS MCP extension bridge, with unified parsing
 
 Usage:
     python inkmcpcli.py <tag> '<attributes>'
@@ -67,11 +67,11 @@ Known Issue: objectBoundingBox gradients require manual nudge to refresh visibil
 import argparse
 import sys
 import json
-import tempfile
 import os
-import subprocess
 import re
 from typing import Dict, List, Any
+
+import macos_bridge
 
 
 def parse_children_array(children_str: str) -> List[Dict[str, Any]]:
@@ -242,16 +242,7 @@ def parse_attributes(param_str: str) -> Dict[str, Any]:
 
 
 class InkscapeClient:
-    """D-Bus client for SVG element creation"""
-
-    def __init__(self):
-        self.dbus_service = "org.inkscape.Inkscape"
-        self.dbus_path = "/org/inkscape/Inkscape"
-        self.dbus_interface = "org.gtk.Actions"
-        self.action_name = "org.khema.inkscape.mcp"
-
-
-
+    """Client for SVG element creation through the macOS bridge"""
 
     def build_element_data(self, tag: str, param_str: str) -> Dict[str, Any]:
         """
@@ -270,62 +261,13 @@ class InkscapeClient:
         return result if result is not None else {"tag": tag, "attributes": {}}
 
     def execute_command(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute command via D-Bus"""
+        """Run one command in Inkscape through the macOS bridge"""
         try:
-            # Create temporary response file for reverse communication (like original system)
-            response_fd, response_file = tempfile.mkstemp(suffix='.json', prefix='inkmcp_response_')
-            os.close(response_fd)  # Close the file descriptor, we just need the path
-            element_data['response_file'] = response_file
-
-            # Write parameters to fixed JSON file (like original system)
-            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
-            with open(params_file, 'w') as f:
-                json.dump(element_data, f)
-
-            # Execute D-Bus command (like original system)
-            cmd = [
-                "gdbus", "call",
-                "--session",
-                "--dest", self.dbus_service,
-                "--object-path", self.dbus_path,
-                "--method", f"{self.dbus_interface}.Activate",
-                self.action_name,
-                "[]", "{}"
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-            if result.returncode != 0:
-                return {
-                    "success": False,
-                    "error": f"D-Bus command failed: {result.stderr}"
-                }
-
-            # Read response from response file (like original system)
-            if os.path.exists(response_file):
-                try:
-                    with open(response_file, 'r') as f:
-                        response = json.load(f)
-                    os.remove(response_file)
-                    return {"success": True, "response": response}
-                except Exception as e:
-                    return {
-                        "success": False,
-                        "error": f"Failed to read response: {str(e)}"
-                    }
-
-            return {"success": True, "output": result.stdout}
-
-        except subprocess.TimeoutExpired:
-            return {
-                "success": False,
-                "error": "Command timed out after 30 seconds"
-            }
+            return {"success": True, "response": macos_bridge.send(element_data)}
+        except macos_bridge.BridgeError as e:
+            return {"success": False, "error": str(e)}
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"Execution failed: {str(e)}"
-            }
+            return {"success": False, "error": f"Execution failed: {str(e)}"}
 
     def format_response(self, result: Dict[str, Any]) -> str:
         """Format the response for display"""
@@ -364,10 +306,6 @@ class InkscapeClient:
         # Fallback to raw output parsing
         try:
             output = result.get("output", "")
-            # D-Bus returns output in format like "('result_here',)"
-            if output.startswith("('") and output.endswith("',)"):
-                output = output[2:-3]  # Remove D-Bus wrapping
-
             response_data = json.loads(output)
 
             if response_data.get("status") == "success":
